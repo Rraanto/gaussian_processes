@@ -30,10 +30,10 @@ class Surrogate():
         """
         self._func = func
 
-        ## generate uniformly distributed training sample in specified bounds 
-        x_min, x_max = bounds
-
+        self.bounds = bounds
         if input_sample is None: 
+            x_min, x_max = self.bounds 
+            ## generate uniformly distributed training sample in specified bounds 
             train_x = torch.rand(sample_size)
             train_x = (1 - train_x) * x_min + train_x * x_max
         else:
@@ -86,6 +86,21 @@ class Surrogate():
 
     def get_training_data(self):
         return self._train_x, self._train_y
+
+    def acquire_training_data(self, new_x):
+        """
+        Acquire new training data 
+
+        training should only occur from the exterior even after acquiring new training data 
+        """
+
+        new_y = self._func(new_x)
+        train_x_new = torch.cat([self._train_x, torch.tensor([new_x])])
+        train_y_new = torch.cat([self._train_y, torch.tensor([new_y])])
+
+        self._train_x = train_x_new 
+        self._train_y = train_y_new 
+        self.gp_model.set_train_data(inputs=self._train_x, targets=self._train_y, strict=False)
 
     def train(self, training_iters=50, verbose=False, details=False):
         """
@@ -191,6 +206,3 @@ if __name__ == "__main__":
 
     plt.title("GP regression of $x \\mapsto cos(sin(x)) cos(x)$")
     plt.legend()
-
-
-
