@@ -21,7 +21,7 @@ class GP(gp.models.ExactGP):
         return gp.distributions.MultivariateNormal(mean_x, covar_x)
 
 class Surrogate():
-    def __init__(self, func, bounds, noise=False, sample_size=10, input_sample=None):
+    def __init__(self, func, bounds, covar=None, noise=False, sample_size=10, input_sample=None):
         """
         func: is a callable 1D function 
         bounds = is a tuple of the x bounds 
@@ -50,14 +50,16 @@ class Surrogate():
         else:
             self.likelihood = gp.likelihoods.GaussianLikelihood()
 
-
+        if covar is None: 
+            covar = gp.kernels.ScaleKernel(gp.kernels.RBFKernel())
+    
         ## Register a gp model as defined by the GP class
         self.gp_model = GP(
             train_x = self._train_x,
             train_y = self._train_y,
             likelihood = self.likelihood,
             mean = gp.means.ConstantMean(),
-            covar = gp.kernels.ScaleKernel(gp.kernels.RBFKernel())
+            covar = covar 
         )
 
         ## Switch to know whether model has trained (since last data acquisition)
@@ -93,6 +95,10 @@ class Surrogate():
 
         Nx defines the discretisation of the input space on which look for the maximum 
         """
+
+        for i in range(dim):
+            search_xi = torch.linspace(*self.bounds, Nx)
+
         search_x = torch.linspace(*self.bounds, Nx)
         _, lower, upper = self.__call__(search_x)
         optimal_idx = torch.argmax(torch.abs(lower - upper))
@@ -183,6 +189,73 @@ class Surrogate():
         samples = output.sample(torch.Size([N]))
 
         return samples
+
+class SurrogateNd(Surrogate):
+    def __init__(self, func, bounds, covar=None, noise=False, sample_size=10, input_sample=None):
+        """
+        func: takes an (N, d) tensor and returns N scalar values
+        bounds: one (min, max) pair per dimension
+        input_sample: an (N, d) tensor overriding sample_size when given
+        """
+        self._func = func
+        self.bounds = bounds
+
+        if input_sample is None:
+            limits = torch.tensor(self.bounds, dtype=torch.get_default_dtype())
+            train_x = torch.rand(sample_size, len(self.bounds))
+            train_x = (1 - train_x) * limits[:, 0] + train_x * limits[:, 1]
+        else:
+            train_x = input_sample
+
+        self._train_x = train_x
+        self._train_y = self._func(self._train_x)
+
+        if not noise:
+            self.likelihood = gp.likelihoods.FixedNoiseGaussianLikelihood(
+                noise=torch.full_like(self._train_y, 1e-4)
+            )
+        else:
+            self.likelihood = gp.likelihoods.GaussianLikelihood()
+
+        if covar is None:
+            covar = gp.kernels.ScaleKernel(gp.kernels.RBFKernel(ard_num_dims=len(self.bounds)))
+
+        self.gp_model = GP(
+            train_x = self._train_x,
+            train_y = self._train_y,
+            likelihood = self.likelihood,
+            mean = gp.means.ConstantMean(),
+            covar = covar
+        )
+
+        self.trained = False
+
+    def find_next_input_sample(self, Nx = 1000):
+        """Find the point with maximum output uncertainty on a grid of Nx points per dimension."""
+        search_axes = [
+            torch.linspace(*bounds, Nx, dtype=self._train_x.dtype, device=self._train_x.device)
+            for bounds in self.bounds
+        ]
+        search_x = torch.stack(torch.meshgrid(*search_axes, indexing="ij"), dim=-1)
+        search_x = search_x.reshape(-1, len(self.bounds))
+        _, lower, upper = self.__call__(search_x)
+        optimal_idx = torch.argmax(torch.abs(lower - upper))
+
+        return search_x[optimal_idx]
+
+    def acquire_training_data(self, new_x):
+        """Acquire new training data from a point or an (N, d) tensor."""
+        self.trained = False
+
+        new_x = new_x.reshape(-1, len(self.bounds))
+        new_y = self._func(new_x)
+        self._train_x = torch.cat([self._train_x, new_x])
+        self._train_y = torch.cat([self._train_y, new_y])
+
+        if isinstance(self.likelihood, gp.likelihoods.FixedNoiseGaussianLikelihood):
+            self.likelihood.noise = torch.full_like(self._train_y, 1e-4)
+
+        self.gp_model.set_train_data(inputs=self._train_x, targets=self._train_y, strict=False)
 
 ## unit test 
 if __name__ == "__main__":
